@@ -21,16 +21,33 @@ import type { ToolDescriptor, ToolEffect, ToolPolicy } from '#mcp/tool/metadata'
 import { resolveSafePath, writeToolOutput, writesFileOutput } from '#mcp/tool/output'
 import { isToolEnabled } from '#mcp/tool/policy'
 import { SELECTION_SCOPE_FILE_OUTPUT_ERROR } from '#mcp/tool/scope'
+import { sendWithSessionDocument } from '#mcp/tool/session-document'
 
 export type RPCSender = (body: Record<string, unknown>) => Promise<unknown>
 export type MCPToolSettled = (context: ServerContext) => Promise<void>
 
 const automationTargetSchema = {
   document_id: v.optional(
-    v.pipe(v.string(), v.description('Optional OpenPencil document/tab ID to target'))
+    v.pipe(
+      v.string(),
+      v.description(
+        'Optional OpenPencil document/tab ID to target. Defaults to the document this session last opened, created, activated, or named, else the active tab'
+      )
+    )
   ),
   page_id: v.optional(
     v.pipe(v.string(), v.description('Optional page ID to target within the document'))
+  )
+}
+
+const activateEntry = {
+  activate: v.optional(
+    v.pipe(
+      v.boolean(),
+      v.description(
+        'Bring the document to the front (default true). Pass false to open it behind the active tab, so the person and other agents keep theirs; later calls from this session still reach it'
+      )
+    )
   )
 }
 
@@ -108,7 +125,9 @@ function agentCallId(meta: Record<string, unknown> | undefined): string | undefi
 }
 
 export function registerTools(mcpServer: McpServer, options: RegisterToolsOptions): void {
-  const { policy, sendRPC, agentSession } = options
+  const { policy, agentSession } = options
+  // One registration serves one session, so it remembers the document that session works in.
+  const sendRPC = sendWithSessionDocument(options.sendRPC)
   // Sent with each tool call: the session, the client's name once it has introduced itself,
   // and for an app chat's agent, the chat and the call's id in it.
   const agent = (meta: Record<string, unknown> | undefined) => {
@@ -300,16 +319,22 @@ export function registerTools(mcpServer: McpServer, options: RegisterToolsOption
             v.minLength(1),
             v.description('Path to the design file, absolute or relative to the MCP root')
           ),
+          ...activateEntry,
           ...automationTargetSchema
         })
       },
-      async (args: { path: string; document_id?: string; page_id?: string }) => {
+      async (args: {
+        path: string
+        activate?: boolean
+        document_id?: string
+        page_id?: string
+      }) => {
         try {
           const safe = await resolveSafePath(args.path, resolvedRoot)
           const { target } = splitAutomationTarget(args)
           const result = await sendRPC({
             command: 'open_file',
-            args: { ...target, path: safe.realPath }
+            args: { ...target, path: safe.realPath, activate: args.activate }
           })
           const res = result as { ok?: boolean; result?: unknown; target?: unknown; error?: string }
           if (res.ok === false) return fail(new Error(res.error))
@@ -353,17 +378,23 @@ export function registerTools(mcpServer: McpServer, options: RegisterToolsOption
               v.description('Path for the new file, absolute or relative to the MCP root')
             )
           ),
+          ...activateEntry,
           ...automationTargetSchema
         })
       },
-      async (args: { path?: string; document_id?: string; page_id?: string }) => {
+      async (args: {
+        path?: string
+        activate?: boolean
+        document_id?: string
+        page_id?: string
+      }) => {
         try {
           const safePath =
             args.path !== undefined ? await resolveSafePath(args.path, resolvedRoot) : undefined
           const { target } = splitAutomationTarget(args)
           const result = await sendRPC({
             command: 'new_document',
-            args: { ...target, path: safePath?.realPath }
+            args: { ...target, path: safePath?.realPath, activate: args.activate }
           })
           const res = result as { ok?: boolean; result?: unknown; target?: unknown; error?: string }
           if (res.ok === false) return fail(new Error(res.error))
