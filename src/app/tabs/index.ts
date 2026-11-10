@@ -67,6 +67,8 @@ export interface Tab {
 const io = new IORegistry(BUILTIN_IO_FORMATS)
 const fileOpenCoordinator = createFileOpenCoordinator()
 const coverThumbnailListeners = new WeakMap<EditorStore, () => void>()
+/** Untouched documents an agent works in, which the next file open must not take over. */
+const claimedStores = new WeakSet<EditorStore>()
 
 let nextTabId = 1
 
@@ -121,12 +123,30 @@ export function getTabsSnapshot(): Tab[] {
   return [...tabsRef.value]
 }
 
-export function createTab(store?: EditorStore, initialGraph?: SceneGraph): Tab {
+export interface TabOpenOptions {
+  /** False opens the tab behind the one in front, which keeps the person's tab on screen. */
+  activate?: boolean
+}
+
+export function createTab(
+  store?: EditorStore,
+  initialGraph?: SceneGraph,
+  { activate = true }: TabOpenOptions = {}
+): Tab {
   const s = store ?? createEditorStore(initialGraph)
   const tab: Tab = { id: generateTabId(), store: s, kind: 'document' }
   tabsRef.value = [...tabsRef.value, tab]
-  activateTab(tab)
+  if (activate) activateTab(tab)
   return tab
+}
+
+/**
+ * Keeps an untouched document from being reused by the next file open, which would load another
+ * file into the tab an agent was given for its work.
+ */
+export function claimTab(tabId: string): void {
+  const tab = getTabById(tabId)
+  if (tab) claimedStores.add(tab.store)
 }
 
 /**
@@ -284,8 +304,16 @@ function isDOMImportFile(file: File): boolean {
  */
 type OpeningTab = { store: EditorStore; created: boolean; from: Tab | undefined }
 
-function reusableTabStore(): OpeningTab {
+function reusableTabStore({ activate = true }: TabOpenOptions = {}): OpeningTab {
   const current = activeTab.value
+  // Only the tab in front is reused, so a file opened behind it gets a tab of its own.
+  if (!activate) {
+    return {
+      store: createTab(undefined, undefined, { activate }).store,
+      created: true,
+      from: current
+    }
+  }
   const source = current?.store.getSourceIdentity()
   const isUntouched =
     current?.kind === 'document' &&
@@ -294,7 +322,8 @@ function reusableTabStore(): OpeningTab {
     !current.store.hasUnsavedChanges() &&
     current.store.getStorageBinding() === null &&
     source?.path === null &&
-    source.handle === null
+    source.handle === null &&
+    !claimedStores.has(current.store)
   if (current && isUntouched) return { store: current.store, created: false, from: current }
   return { store: createTab().store, created: true, from: current }
 }
@@ -357,7 +386,9 @@ async function showImportedGraph(
   store: EditorStore,
   graph: SceneGraph,
   prepare?: () => void | Promise<void>,
-  load?: DocumentLoadSession
+  load?: DocumentLoadSession,
+  /** Told once the document and its page are in place, before the view and the first frame. */
+  onLoaded?: () => void
 ): Promise<void> {
   load?.update({ phase: 'materializing', detail: store.state.documentName })
   await applyImportedDocument(store, graph, load)
@@ -375,6 +406,7 @@ async function showImportedGraph(
   await store.switchPage(pageId, {
     preparation: load,
     beforePresentation: async () => {
+      onLoaded?.()
       if (remembered) {
         await nextShownFrame({ signal: load?.signal })
         store.centerOn(remembered.center.x, remembered.center.y, remembered.zoom)
@@ -555,10 +587,21 @@ export async function openStorageDocumentInNewTab(
   return store
 }
 
+export interface FileOpenOptions extends TabOpenOptions {
+  /**
+   * Resolve once the document and its first page are loaded, rather than drawn. A tab in the
+   * background or a hidden window draws nothing until someone looks, which an agent must not
+   * wait for; the open places the view and draws when the tab shows, and keeps the document
+   * even if a page switch then takes over.
+   */
+  untilLoaded?: boolean
+}
+
 export async function openFileInNewTab(
   file: File,
   handle?: FileSystemFileHandle,
-  path?: string
+  path?: string,
+  { activate = true, untilLoaded = false }: FileOpenOptions = {}
 ): Promise<EditorStore> {
   const identity: DocumentSourceIdentity = {
     handle: handle ?? null,
@@ -568,13 +611,18 @@ export async function openFileInNewTab(
     const pending = await fileOpenCoordinator.findPending(identity)
     if (pending) {
       const tab = getTabForStore(pending.store)
-      if (tab) switchTab(tab.id)
-      return { kind: 'pending' as const, completion: pending.completion, store: pending.store }
+      if (tab && activate) switchTab(tab.id)
+      return {
+        kind: 'pending' as const,
+        completion: pending.completion,
+        loaded: pending.loaded,
+        store: pending.store
+      }
     }
 
     const existing = await findTabByFileIdentity(tabsRef.value, identity)
     if (existing) {
-      switchTab(existing.id)
+      if (activate) switchTab(existing.id)
       if (path && isFigArchiveName(path)) {
         watchOpenedFigCover(path, existing.store)
         void cacheOpenedFigCover(path, existing.store).catch((error) => {
@@ -584,7 +632,7 @@ export async function openFileInNewTab(
       return { kind: 'existing' as const, store: existing.store }
     }
 
-    const opening = reusableTabStore()
+    const opening = reusableTabStore({ activate })
     const { store } = opening
     store.state.documentName = filename(file.name) ?? file.name
     const load = store.preparationController.begin({
@@ -594,75 +642,97 @@ export async function openFileInNewTab(
 
     const completion = createDeferred<undefined>()
     void completion.promise.catch(() => undefined)
-    const pendingOpen = { completion: completion.promise, identity, store }
+    const loaded = createDeferred<undefined>()
+    const pendingOpen = { completion: completion.promise, loaded: loaded.promise, identity, store }
     fileOpenCoordinator.add(pendingOpen)
-    return { kind: 'owner' as const, completion, pendingOpen, store, opening, load }
+    return { kind: 'owner' as const, completion, loaded, pendingOpen, store, opening, load }
   })
 
   if (decision.kind === 'existing') return decision.store
   if (decision.kind === 'pending') {
-    await decision.completion
+    await (untilLoaded ? Promise.race([decision.loaded, decision.completion]) : decision.completion)
     return decision.store
   }
 
-  const { completion, pendingOpen, store, opening, load } = decision
-  let succeeded = false
-  try {
-    if (isDOMImportFile(file)) {
-      await store.openDOMFile(file, { handle, path, preparation: load })
+  const { completion, loaded, pendingOpen, store, opening, load } = decision
+  let isLoaded = false
+  const reportLoaded = () => {
+    isLoaded = true
+    loaded.resolve(undefined)
+  }
+  const running = finishOpen()
+  if (!untilLoaded) return running
+  // Past loading, what is left reports its own failure through the preparation.
+  void running.catch(() => undefined)
+  await Promise.race([loaded.promise, running])
+  return store
+
+  async function finishOpen(): Promise<EditorStore> {
+    let succeeded = false
+    try {
+      if (isDOMImportFile(file)) {
+        await store.openDOMFile(file, { handle, path, preparation: load })
+        completion.resolve(undefined)
+        succeeded = true
+        return store
+      }
+
+      await nextFrame()
+      load.update({ phase: 'reading', detail: file.name })
+      const isFig = isFigArchiveName(file.name)
+      let imported: SceneGraph
+      let sourceFormat: string
+      if (isFig) {
+        load.update({ phase: 'decoding', detail: file.name })
+        imported = await readFigForTab(file, load.signal)
+        sourceFormat = 'fig'
+      } else {
+        const result = await io.readDocument(
+          {
+            name: file.name,
+            mimeType: file.type || undefined,
+            data: new Uint8Array(await file.arrayBuffer()),
+            readAsset: documentAssetReader(path)
+          },
+          { icons: appIcons }
+        )
+        imported = result.graph
+        sourceFormat = result.sourceFormat
+      }
+
+      await showImportedGraph(
+        store,
+        imported,
+        () => {
+          store.setDocumentSource(file.name, sourceFormat, handle, path)
+          if (isFig && path) watchOpenedFigCover(path, store)
+        },
+        load,
+        reportLoaded
+      )
+      if (isFig && path) {
+        void cacheOpenedFigCover(path, store).catch((error) => {
+          console.warn('[Recent files] Failed to cache the thumbnail', error)
+        })
+      }
       completion.resolve(undefined)
       succeeded = true
       return store
+    } catch (error) {
+      failPreparation(load, 'decode-failed', error)
+      // An agent may already be working in the loaded document: a page switch that took over its
+      // first frame leaves it open.
+      if (untilLoaded && isLoaded) {
+        completion.resolve(undefined)
+        return store
+      }
+      completion.reject(error)
+      await releaseOpeningTab(opening)
+      throw error
+    } finally {
+      if (succeeded) load.complete()
+      fileOpenCoordinator.remove(pendingOpen)
     }
-
-    await nextFrame()
-    load.update({ phase: 'reading', detail: file.name })
-    const isFig = isFigArchiveName(file.name)
-    let imported: SceneGraph
-    let sourceFormat: string
-    if (isFig) {
-      load.update({ phase: 'decoding', detail: file.name })
-      imported = await readFigForTab(file, load.signal)
-      sourceFormat = 'fig'
-    } else {
-      const result = await io.readDocument(
-        {
-          name: file.name,
-          mimeType: file.type || undefined,
-          data: new Uint8Array(await file.arrayBuffer()),
-          readAsset: documentAssetReader(path)
-        },
-        { icons: appIcons }
-      )
-      imported = result.graph
-      sourceFormat = result.sourceFormat
-    }
-
-    await showImportedGraph(
-      store,
-      imported,
-      () => {
-        store.setDocumentSource(file.name, sourceFormat, handle, path)
-        if (isFig && path) watchOpenedFigCover(path, store)
-      },
-      load
-    )
-    if (isFig && path) {
-      void cacheOpenedFigCover(path, store).catch((error) => {
-        console.warn('[Recent files] Failed to cache the thumbnail', error)
-      })
-    }
-    completion.resolve(undefined)
-    succeeded = true
-    return store
-  } catch (error) {
-    failPreparation(load, 'decode-failed', error)
-    completion.reject(error)
-    await releaseOpeningTab(opening)
-    throw error
-  } finally {
-    if (succeeded) load.complete()
-    fileOpenCoordinator.remove(pendingOpen)
   }
 }
 

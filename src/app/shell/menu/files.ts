@@ -13,10 +13,11 @@ import {
   MAX_REMOTE_DOCUMENT_BYTES,
   readBoundedBody
 } from '@/app/document/io/browser'
+import type { EditorStore } from '@/app/editor/session'
 import { notificationMessages } from '@/app/i18n/notifications'
 import { rememberRecentFile } from '@/app/recent-files'
 import { toast } from '@/app/shell/ui'
-import { getTabsSnapshot, openFileInNewTab, switchTab } from '@/app/tabs'
+import { getTabsSnapshot, openFileInNewTab, switchTab, type FileOpenOptions } from '@/app/tabs'
 import { findTabByFileIdentity } from '@/app/tabs/open/identity'
 import { isTauri } from '@/app/tauri/env'
 import { IS_BROWSER } from '@/constants'
@@ -71,6 +72,15 @@ function fileNameFromURL(url: URL): string {
 
 /** Fetches a document over HTTP and opens it in a new tab. Browser builds only. */
 export async function openBrowserFileFromURL(url: URL, init?: RequestInit): Promise<void> {
+  await openURLInTab(url, init)
+}
+
+/** As `openBrowserFileFromURL`, resolving with the document that shows the file. */
+export async function openURLInTab(
+  url: URL,
+  init?: RequestInit,
+  options?: FileOpenOptions
+): Promise<EditorStore> {
   // The cap needs a controller of its own, so a caller's signal is combined with it
   // rather than replaced: dropping it would leave the caller unable to cancel.
   const controller = new AbortController()
@@ -89,7 +99,7 @@ export async function openBrowserFileFromURL(url: URL, init?: RequestInit): Prom
   const name = fileNameFromURL(url)
   assertSupportedDesignFile(name)
   const file = new File([bytes], name, { type: 'application/octet-stream' })
-  await openFileInNewTab(file, undefined, url.href)
+  return openFileInNewTab(file, undefined, url.href, options)
 }
 
 function isSupportedDesignFile(fileName: string): boolean {
@@ -138,11 +148,23 @@ export async function chooseTauriOpenPaths(): Promise<string[]> {
   return typeof paths === 'string' ? [paths] : paths
 }
 
-export async function openFileFromPath(path: string) {
-  if (!isTauri()) return
+export async function openFileFromPath(path: string): Promise<void> {
+  await openPathInTab(path)
+}
+
+/**
+ * Opens a file from disk in the desktop app and resolves with the document that shows it; null
+ * in the browser, which has no paths.
+ */
+export async function openPathInTab(
+  path: string,
+  options?: FileOpenOptions
+): Promise<EditorStore | null> {
+  if (!isTauri()) return null
   const file = await readTauriDesignFile(path)
-  const store = await openFileInNewTab(file, undefined, path)
+  const store = await openFileInNewTab(file, undefined, path, options)
   rememberRecentFile(path, store.state.documentKind)
+  return store
 }
 
 /**

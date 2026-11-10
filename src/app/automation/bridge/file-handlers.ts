@@ -13,9 +13,8 @@ import {
 } from '@/app/automation/bridge/target'
 import { resolveBrowserFileURL } from '@/app/document/io/browser'
 import { documentPathFor } from '@/app/document/io/names'
-import { openBrowserFileFromURL } from '@/app/shell/menu/files'
-import { openFileFromPath } from '@/app/shell/menu/use'
-import { closeTab, createTab, getActiveStore, getTabById } from '@/app/tabs'
+import { openPathInTab, openURLInTab } from '@/app/shell/menu/files'
+import { claimTab, closeTab, createTab, getTabById, getTabForStore } from '@/app/tabs'
 import { isTauri } from '@/app/tauri/env'
 
 /** Where a browser app reads and writes the paths the file tools name: the MCP server's `/files/`. */
@@ -25,6 +24,15 @@ export interface AutomationFiles {
 }
 
 const saveArgsSchema = v.object({ path: v.optional(v.string()) })
+
+/**
+ * Documents an agent opens come to the front unless it passes `activate: false`, which leaves
+ * the person and other agents on the tab they have in front.
+ */
+const openArgsSchema = v.object({
+  path: v.optional(v.string()),
+  activate: v.optional(v.boolean(), true)
+})
 
 /**
  * Automation always writes a Figma archive. The destination is the path asked for, or else the
@@ -157,8 +165,10 @@ export function createFileHandlers(files?: AutomationFiles) {
   }
 
   async function handleNewDocument(_target: AutomationTarget, args: unknown): Promise<unknown> {
-    const { path } = parseToolArgs('new_document', saveArgsSchema, args)
-    const tab = createTab()
+    const { path, activate } = parseToolArgs('new_document', openArgsSchema, args)
+    const tab = createTab(undefined, undefined, { activate })
+    // Until the agent draws in it, the new tab looks unused, and the next file open would reuse it.
+    claimTab(tab.id)
     if (path) {
       try {
         await saveWithoutPrompt(tab.store, path)
@@ -172,18 +182,26 @@ export function createFileHandlers(files?: AutomationFiles) {
   }
 
   async function handleOpenFile(_target: AutomationTarget, args: unknown): Promise<unknown> {
-    const path = (args as { path?: string }).path
+    const { path, activate } = parseToolArgs('open_file', openArgsSchema, args)
     if (!path) throw new Error('Missing "path" in args')
+    // Loaded is enough: a document behind the tab in front, or in a hidden window, is not drawn
+    // until someone looks at it.
+    const options = { activate, untilLoaded: true }
+    let store
     if (isTauri()) {
-      await openFileFromPath(path)
+      store = await openPathInTab(path, options)
     } else if (files) {
       // The browser cannot read the path, so it fetches it from the MCP server, with the same
       // cap and format check as every other browser open.
-      await openBrowserFileFromURL(files.url(path), { headers: files.headers })
+      store = await openURLInTab(files.url(path), { headers: files.headers }, options)
     } else {
-      await openBrowserFileFromURL(resolveBrowserFileURL(path))
+      store = await openURLInTab(resolveBrowserFileURL(path), undefined, options)
     }
-    const target = resolveAutomationTarget(getActiveStore(), undefined)
+    // The opened document, not the tab in front: another agent may have brought its own forward.
+    const tab = store ? getTabForStore(store) : undefined
+    if (!tab) throw new Error(`"${path}" was closed before it finished opening`)
+    claimTab(tab.id)
+    const target = resolveAutomationTarget(tab.store, { document_id: tab.id })
     return responseWithTarget({ ok: true, result: { opened: true } }, target)
   }
 

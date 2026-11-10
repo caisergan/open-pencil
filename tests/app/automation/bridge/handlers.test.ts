@@ -852,6 +852,45 @@ describe('file paths in a browser go through the MCP server', () => {
     expect(new Headers(init?.headers).get('authorization')).toBe('Bearer token')
     expect(getActiveStore().state.documentName).toBe('my #1 slots')
   })
+
+  test('an agent can open a file behind the tab in front without waiting for it to draw', async () => {
+    const front = createTab()
+    const bytes = new Uint8Array(await Bun.file(testPath('fixtures', 'slots.fig')).arrayBuffer())
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(bytes))
+
+    // Nothing acknowledges a frame: a document nobody looks at is not drawn.
+    const opened = await requestThroughServer('open_file', {
+      path: '/root/behind.fig',
+      activate: false
+    })
+
+    const documentId = (opened as { target?: { documentId: string } }).target?.documentId ?? ''
+    expect(getActiveTabId()).toBe(front.id)
+    expect(documentId).not.toBe(front.id)
+    expect(getTabById(documentId)?.store.state.documentName).toBe('behind')
+  })
+
+  test('a file another agent opens does not load into a new document', async () => {
+    const created = await requestThroughServer('new_document', {})
+    const documentId = (created as { target?: { documentId: string } }).target?.documentId ?? ''
+    const bytes = new Uint8Array(await Bun.file(testPath('fixtures', 'slots.fig')).arrayBuffer())
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(bytes))
+
+    const opened = await requestThroughServer('open_file', { path: '/root/other.fig' })
+
+    expect((opened as { target?: { documentId: string } }).target?.documentId).not.toBe(documentId)
+    expect(getTabById(documentId)?.store.state.documentName).toBe('Untitled')
+  })
+
+  test('a new document can open behind the tab in front', async () => {
+    const front = createTab()
+
+    const created = await requestThroughServer('new_document', { activate: false })
+
+    const documentId = (created as { target?: { documentId: string } }).target?.documentId ?? ''
+    expect(getActiveTabId()).toBe(front.id)
+    expect(getTabById(documentId)).toBeDefined()
+  })
 })
 
 describe('list_recent_files', () => {

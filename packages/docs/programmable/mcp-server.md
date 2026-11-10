@@ -165,6 +165,8 @@ Each MCP session shows in the app as an agent with a callsign, like the built-in
 
 Most tools accept optional `document_id` and `page_id` fields. Pass them explicitly for agent workflows instead of relying on the visible active tab/page. `create_page` only creates a page; call `switch_page` separately when the workflow should change the active page.
 
+Several agents can work in one running app at once. Each MCP session keeps its own document: once it opens, creates, activates, or names one, its calls without `document_id` go there rather than to the tab in front, so another agent opening a file does not redirect them. `open_file` and `new_document` take `activate: false` to open the document behind the tab in front, leaving the person and other agents on theirs; `open_file` returns once the file is loaded, without waiting for a tab nobody is looking at to draw. Documents in background tabs export images and visual diffs like the one on screen.
+
 ## AI Agent Skill
 
 Teach your AI coding agent to use OpenPencil tools:

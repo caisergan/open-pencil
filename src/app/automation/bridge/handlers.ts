@@ -25,6 +25,7 @@ import {
 } from '@/app/automation/bridge/target'
 import { createAutomationToolHandler } from '@/app/automation/bridge/tool-handlers'
 import type { EditorStore } from '@/app/editor/active-store'
+import { claimTab } from '@/app/tabs'
 
 type FigmaFactory = (store: EditorStore, pageId?: string, signal?: AbortSignal) => FigmaAPI
 
@@ -103,6 +104,8 @@ export function createAutomationCommandHandlers(makeFigma: FigmaFactory, files?:
 
     const rawArgs = isUnknownRecord(args) ? args : {}
     const target = resolveAutomationTarget(store, rawArgs)
+    // A document an agent names is its workspace, even while it still looks unused.
+    if (typeof rawArgs.document_id === 'string') claimTab(target.documentId)
     return handleTargetCommand(target, command, stripAutomationTargetArgs(rawArgs), signal)
   }
 
