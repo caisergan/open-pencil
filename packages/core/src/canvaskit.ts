@@ -4,6 +4,12 @@ import { IS_BROWSER } from './constants'
 import { servesRuntimeAsset, unservedRuntimeAssetMessage } from './runtime-assets/served'
 
 let instance: Promise<CanvasKit> | null = null
+let loaded: CanvasKit | null = null
+
+/** The CanvasKit `getCanvasKit` has finished loading, or null before then. */
+export function getLoadedCanvasKit(): CanvasKit | null {
+  return loaded
+}
 
 /** How long a failed load waits to learn whether its binary was served before giving up. */
 const EXPLAIN_TIMEOUT_MS = 5000
@@ -54,9 +60,14 @@ async function explainFailedLoad(url: string, error: unknown): Promise<unknown> 
 export function getCanvasKit(options?: CanvasKitOptions): Promise<CanvasKit> {
   if (instance) return instance
   const locate = options?.locateFile ?? locator
-  const loading = CanvasKitInit({ locateFile: locate }).catch(async (error: unknown) => {
-    throw IS_BROWSER ? await explainFailedLoad(locate('canvaskit.wasm'), error) : error
-  })
+  const loading = CanvasKitInit({ locateFile: locate })
+    .then((ck) => {
+      loaded = ck
+      return ck
+    })
+    .catch(async (error: unknown) => {
+      throw IS_BROWSER ? await explainFailedLoad(locate('canvaskit.wasm'), error) : error
+    })
   instance = loading
   loading.catch(() => {
     if (instance === loading) instance = null

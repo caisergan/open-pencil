@@ -9,19 +9,14 @@ import type { AutomationTarget } from '@/app/automation/bridge/target'
 import type { EditorStore } from '@/app/editor/active-store'
 
 /**
- * Raster exports draw with the document's canvas renderer, which exists only once its canvas
- * has created a WebGL surface; without one, say so instead of returning an empty image.
+ * Raster exports draw with the document's canvas renderer, or without a canvas, as in a
+ * background tab, with the headless one: agents working in several documents see each.
  */
 export function renderAutomationImage(
   store: EditorStore,
   nodeIds: string[],
   { scale = 1, format = 'PNG', pageId, useAbsoluteBounds }: ExportImageOptions
 ): Promise<Uint8Array | null> {
-  if (!store.renderer) {
-    throw new Error(
-      'This document has no canvas renderer, so it cannot be exported as an image: its canvas has not started or could not create a WebGL surface'
-    )
-  }
   return store.renderExportImage(nodeIds, scale, format, pageId, { useAbsoluteBounds })
 }
 
