@@ -7,3 +7,4 @@ stdio and Hono HTTP MCP server that reuses Core tools (`packages/core/AGENTS.md`
 - File access must resolve symlinks inside the effective MCP root. CLI defaults are the current directory on macOS and Linux and the home directory on Windows.
 - Keep browser lifecycle out of this package and out of Core.
 - Transport tests live under `packages/mcp/tests/{server,stdio,transport}` with their helpers in `packages/mcp/tests/helpers`; isolate tests from user runtime discovery. Playwright starts the development MCP companion through the Vite automation plugin; see `tests/AGENTS.md`.
+- One `registerTools` call serves one session and sends through `sendWithSessionDocument`, so calls without `document_id` reach the document that session chose, not the tab in front; list a new app-wide command in its `UNTARGETED_COMMANDS` (`packages/mcp/tests/tool/session-document.test.ts`).

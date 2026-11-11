@@ -4,6 +4,8 @@ import { fileIdentitiesMatch, hasFileIdentity } from '@/app/tabs/open/identity'
 
 type PendingOpen = {
   completion: Promise<undefined>
+  /** Settles once the document and its first page are in place, before the first frame. */
+  loaded: Promise<undefined>
   identity: DocumentSourceIdentity
   store: EditorStore
 }

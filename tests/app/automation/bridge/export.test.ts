@@ -7,6 +7,7 @@ import { SkiaRenderer } from '@open-pencil/core/canvas'
 import { getCanvasKit } from '@open-pencil/core/canvaskit'
 import { BUILTIN_IO_FORMATS, IORegistry } from '@open-pencil/core/io'
 import { parseFigFile } from '@open-pencil/core/io/formats/fig'
+import { createCanvasKitRasterCodec } from '@open-pencil/core/io/formats/raster'
 import { SceneGraph } from '@open-pencil/scene-graph'
 import { imageSize } from '@open-pencil/scene-graph/images'
 
@@ -170,18 +171,88 @@ describe('automation export of a page that is not on screen', () => {
   })
 })
 
-describe('automation export without a canvas renderer', () => {
-  test('export_image says the document has no renderer', async () => {
-    const store = createEditorStore()
-    stores.push(store)
-    const pageId = store.state.currentPageId
-    const frame = store.graph.createNode('FRAME', pageId, { width: 40, height: 30, fills: [RED] })
+/**
+ * A document whose tab went to the background: the app unmounts its canvas, which takes the
+ * canvas renderer away from the editor and destroys it.
+ */
+async function storeInBackgroundTab(): Promise<EditorStore> {
+  const store = await storeWithCanvas()
+  for (const renderer of store.canvasRenderers) {
+    store.removeCanvasRenderer(renderer)
+    renderer.destroy()
+  }
+  expect(store.renderer).toBeNull()
+  return store
+}
 
-    const response = handleTargetCommand(target(store, pageId), 'tool', {
+/** The RGBA pixel at the centre of an image. */
+async function centrePixel(bytes: Uint8Array): Promise<number[]> {
+  const image = createCanvasKitRasterCodec(await getCanvasKit()).decode(bytes)
+  if (!image) throw new Error('Could not decode the image')
+  const offset = (Math.floor(image.height / 2) * image.width + Math.floor(image.width / 2)) * 4
+  return [...image.data.subarray(offset, offset + 4)]
+}
+
+describe('automation export of a document with no canvas', () => {
+  test('export_image draws the layers of a document in a background tab', async () => {
+    const store = await storeInBackgroundTab()
+    const page = store.state.currentPageId
+    const frame = store.graph.createNode('FRAME', page, { width: 40, height: 30, fills: [RED] })
+
+    const response = await handleTargetCommand(target(store, page), 'tool', {
       name: 'export_image',
       args: { ids: [frame.id] }
     })
 
-    await expect(response).rejects.toThrow('This document has no canvas renderer')
+    const image = resultBytes(response)
+    expect(imageSize(image)).toEqual({ width: 40, height: 30 })
+    expect(await centrePixel(image)).toEqual([255, 0, 0, 255])
+  })
+
+  test('a page export draws a document in a background tab', async () => {
+    const store = await storeInBackgroundTab()
+    const page = store.state.currentPageId
+    store.graph.createNode('FRAME', page, { width: 60, height: 25, fills: [RED] })
+
+    const response = await handleTargetCommand(target(store, page), 'export', { scope: 'page' })
+
+    const image = resultBytes(response)
+    expect(imageSize(image)).toEqual({ width: 60, height: 25 })
+    expect(await centrePixel(image)).toEqual([255, 0, 0, 255])
+  })
+
+  test('export_image draws a document whose canvas never started', async () => {
+    const store = createEditorStore()
+    stores.push(store)
+    const page = store.state.currentPageId
+    const frame = store.graph.createNode('FRAME', page, { width: 20, height: 20, fills: [RED] })
+
+    const response = await handleTargetCommand(target(store, page), 'tool', {
+      name: 'export_image',
+      args: { ids: [frame.id] }
+    })
+
+    expect(await centrePixel(resultBytes(response))).toEqual([255, 0, 0, 255])
+  })
+
+  test('diff_visual compares layers of a document in a background tab', async () => {
+    const store = await storeInBackgroundTab()
+    const page = store.state.currentPageId
+    const from = store.graph.createNode('FRAME', page, { width: 20, height: 20, fills: [RED] })
+    const blue = { ...RED, color: { r: 0, g: 0, b: 1, a: 1 } }
+    const to = store.graph.createNode('FRAME', page, {
+      x: 40,
+      width: 20,
+      height: 20,
+      fills: [blue]
+    })
+
+    const response = await handleTargetCommand(target(store, page), 'tool', {
+      name: 'diff_visual',
+      args: { from: from.id, to: to.id }
+    })
+
+    expect(imageSize(resultBytes(response))).toEqual({ width: 20, height: 20 })
+    expect(response).toMatchObject({ result: { changedPixels: 400, totalPixels: 400 } })
   })
 })

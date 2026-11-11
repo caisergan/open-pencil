@@ -1,3 +1,4 @@
+import { getLoadedCanvasKit } from '@open-pencil/core/canvaskit'
 import { FigmaAPI, MAX_IMAGE_FETCH_BYTES } from '@open-pencil/core/figma-api'
 import { createCanvasKitRasterCodec } from '@open-pencil/core/io/formats/raster'
 
@@ -55,6 +56,8 @@ export function makeFigmaFromStore(
   }
   api.exportImage = async (nodeIds, opts) =>
     renderAutomationImage(store, nodeIds, { ...opts, pageId: opts.pageId ?? pageId })
-  if (store.renderer) api.rasterCodec = createCanvasKitRasterCodec(store.renderer.ck)
+  // A document in a background tab has no canvas renderer, but its exports still decode.
+  const ck = store.renderer?.ck ?? getLoadedCanvasKit()
+  if (ck) api.rasterCodec = createCanvasKitRasterCodec(ck)
   return api
 }

@@ -8,7 +8,11 @@ import {
   type IOFormatAdapter,
   type IORegistry
 } from '@open-pencil/core/io'
-import { type RasterExportFormat, renderNodesToImage } from '@open-pencil/core/io/formats/raster'
+import {
+  headlessRenderNodes,
+  type RasterExportFormat,
+  renderNodesToImage
+} from '@open-pencil/core/io/formats/raster'
 import type { SceneGraph } from '@open-pencil/scene-graph'
 
 import type { ExportOptions } from '@/app/document/export/types'
@@ -61,7 +65,8 @@ export function getExportBytes(data: ExportData): Uint8Array {
 export function createExportTargetActions(editor: Editor, state: EditorState, io: IORegistry) {
   /**
    * Renders `nodeIds` on the page that holds them, which need not be the page on screen;
-   * without IDs, renders every layer of `pageId`.
+   * without IDs, renders every layer of `pageId`. A document whose tab is in the background
+   * has no canvas, so it draws with the headless renderer, as the CLI does.
    */
   async function renderExportImage(
     nodeIds: string[],
@@ -70,16 +75,16 @@ export function createExportTargetActions(editor: Editor, state: EditorState, io
     pageId = state.currentPageId,
     { useAbsoluteBounds = false }: { useAbsoluteBounds?: boolean } = {}
   ): Promise<Uint8Array<ArrayBuffer> | null> {
-    const renderer = editor.renderer
-    if (!renderer) return null
     const ids = nodeIds.length > 0 ? nodeIds : editor.graph.getChildren(pageId).map((n) => n.id)
     if (ids.length === 0) return null
     const ownerPageId = findPageId(editor.graph, ids[0]) ?? pageId
-    return renderNodesToImage(renderer.ck, renderer, editor.graph, ownerPageId, ids, {
-      scale,
-      format,
-      useAbsoluteBounds
-    })
+    const options = { scale, format, useAbsoluteBounds }
+    const renderer = editor.renderer
+    if (renderer) {
+      return renderNodesToImage(renderer.ck, renderer, editor.graph, ownerPageId, ids, options)
+    }
+    const bytes = await headlessRenderNodes(editor.graph, ownerPageId, ids, options)
+    return bytes ? new Uint8Array(bytes) : null
   }
 
   function getSelectionExportTarget(): ExportRequest['target'] {

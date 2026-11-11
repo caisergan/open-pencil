@@ -10,10 +10,13 @@ import type { DocumentSourceIdentity } from '@/app/document/io/types'
 import { getRecoveryStore, resetRecoveryStoreForTests } from '@/app/document/recovery'
 import { createMemoryRecoveryStore } from '@/app/document/recovery/memory'
 import {
+  claimTab,
   closeTab,
   createHomeTab,
   createTab,
   getActiveStore,
+  getActiveTabId,
+  getTabForStore,
   getTabsSnapshot,
   onTabDocumentReplaced,
   openFileInNewTab,
@@ -390,5 +393,91 @@ describe('openFileInNewTab deduplication', () => {
 
     expect(tabCount()).toBe(initialCount + 1)
     expect(figModule.readFigFile).toHaveBeenCalledTimes(2)
+  })
+
+  describe('with several agents in the app', () => {
+    /** Settles within a few turns, or fails: an open that waits for a frame never does here. */
+    async function withinTurns<T>(pending: Promise<T>): Promise<T> {
+      const late = Symbol('late')
+      const result = await Promise.race([
+        pending,
+        new Promise<typeof late>((resolve) => {
+          setTimeout(() => resolve(late), 50)
+        })
+      ])
+      if (result === late) throw new Error('The open waited for a frame')
+      return result as T
+    }
+
+    test('an agent’s open resolves once the file is loaded, though no frame is drawn', async () => {
+      const store = await withinTurns(
+        openFileInNewTab(new File([], 'loaded.fig'), undefined, '/tmp/loaded.fig', {
+          untilLoaded: true
+        })
+      )
+
+      expect(store.getSourceIdentity().path).toBe('/tmp/loaded.fig')
+      expect(getActiveStore()).toBe(store)
+      acknowledgePendingPresentation()
+    })
+
+    test('an agent opening a file still being opened gets it once it is loaded', async () => {
+      const file = new File([], 'shared.fig')
+      const first = openFileInNewTab(file, undefined, '/tmp/shared.fig')
+
+      const store = await withinTurns(
+        openFileInNewTab(file, undefined, '/tmp/shared.fig', { untilLoaded: true })
+      )
+
+      expect(store.getSourceIdentity().path).toBe('/tmp/shared.fig')
+      await settleFileOpen(first)
+      expect(getActiveStore()).toBe(store)
+    })
+
+    test('a file can open behind the tab in front', async () => {
+      const front = createTab()
+
+      const store = await withinTurns(
+        openFileInNewTab(new File([], 'behind.fig'), undefined, '/tmp/behind.fig', {
+          activate: false,
+          untilLoaded: true
+        })
+      )
+
+      expect(getActiveTabId()).toBe(front.id)
+      expect(getTabForStore(store)).toBeDefined()
+      expect(store.getSourceIdentity().path).toBe('/tmp/behind.fig')
+    })
+
+    test('a file does not load into an untouched tab an agent was given', async () => {
+      const claimed = createTab()
+      claimTab(claimed.id)
+      const count = tabCount()
+
+      await settleFileOpen(openFileInNewTab(new File([], 'other.fig'), undefined, '/tmp/other.fig'))
+
+      expect(tabCount()).toBe(count + 1)
+      expect(claimed.store.getSourceIdentity().path).toBeNull()
+      expect(getActiveStore()).not.toBe(claimed.store)
+    })
+
+    test('a page switch before the first frame keeps the document an agent opened', async () => {
+      const graph = new SceneGraph()
+      const second = graph.addPage('Second')
+      ;(figModule.readFigFile as ReturnType<typeof vi.fn>).mockResolvedValue(graph)
+      // A tab of its own, which a failed open would close.
+      claimTab(getActiveTabId())
+
+      const store = await withinTurns(
+        openFileInNewTab(new File([], 'switched.fig'), undefined, '/tmp/switched.fig', {
+          untilLoaded: true
+        })
+      )
+      await settleFileOpen(store.switchPage(second.id))
+
+      expect(getTabForStore(store)).toBeDefined()
+      expect(store.state.currentPageId).toBe(second.id)
+      expect(store.getSourceIdentity().path).toBe('/tmp/switched.fig')
+    })
   })
 })
